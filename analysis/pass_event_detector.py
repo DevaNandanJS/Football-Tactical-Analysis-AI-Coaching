@@ -114,10 +114,12 @@ class PassEventDetector:
         
         # Optional: If the current owner is still holding the ball, we *could* update 
         # current_owner_location to the latest ball position. 
-        # This makes "start_xy" of the *next* pass more accurate (the release point, not receipt point).
-        # We will do this to ensure passes originate from where the player IS, not where they WERE.
-        if self.current_owner_id == assigned_player_id and assigned_player_id != -1:
-             if is_loc_valid:
-                 self.current_owner_location = ball_location_2d
+        # BUT, the user wants the dots to be connected (Reception Point -> Next Pass).
+        # So we DISABLE this update. The 'start_xy' of the next pass will now match 
+        # the 'end_xy' of the previous pass exactly.
+        
+        # if self.current_owner_id == assigned_player_id and assigned_player_id != -1:
+        #      if is_loc_valid:
+        #          self.current_owner_location = ball_location_2d
 
         return new_events

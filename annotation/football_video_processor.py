@@ -12,6 +12,7 @@ from tracking import ObjectTracker, KeypointsTracker
 from club_assignment import ClubAssigner
 from ball_to_player_assignment import BallToPlayerAssigner
 from analysis.pass_event_detector import PassEventDetector
+from analysis.movement_heatmap_generator import MovementHeatmapGenerator
 from utils import rgb_bgr_converter
 
 import cv2
@@ -86,6 +87,13 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
         
         self.pass_annotator = PassNetworkAnnotator(team1_bgr, team2_bgr, field_img_path)
 
+        # Initialize Heatmap Generator
+        self.heatmap_generator = MovementHeatmapGenerator(
+            map_width=self.field_image.shape[1],
+            map_height=self.field_image.shape[0],
+            team_names=[self.club_assigner.club1.name, self.club_assigner.club2.name]
+        )
+
     def process(self, frames: List[np.ndarray], fps: float = 1e-6) -> List[np.ndarray]:
         """
         Processes a batch of video frames, detects and tracks objects, assigns ball possession, and annotates the frames.
@@ -133,17 +141,26 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
                 all_tracks['object'], self.frame_num, self.cur_fps
             )
             
+            # --- Heatmap Logic ---
+            # Extract positions and teams for heatmap update
+            heatmap_positions = {}
+            heatmap_teams = {}
+            for obj_key in ['player', 'goalkeeper']:
+                if obj_key in all_tracks['object']:
+                    for track_id, entity_data in all_tracks['object'][obj_key].items():
+                        if 'projection' in entity_data and 'club' in entity_data:
+                            heatmap_positions[track_id] = entity_data['projection']
+                            heatmap_teams[track_id] = entity_data['club']
+            
+            self.heatmap_generator.update(heatmap_positions, heatmap_teams)
+            heatmaps = self.heatmap_generator.generate_heatmaps()
+            # ---------------------
+            
             # --- Pass Network Logic ---
             # Get data for pass detector
             assigned_team_id = -1
             if assigned_player_id != -1:
                 # Find team ID based on club name
-                # Club Assignor stores 'club' name in track
-                # PassEventDetector expects 0 or 1.
-                # We need to map club name back to 0 or 1.
-                # Helper: club1 is 0, club2 is 1
-                
-                # Check where player is found (player or goalkeeper list)
                 player_data = None
                 if assigned_player_id in all_tracks['object'].get('player', {}):
                      player_data = all_tracks['object']['player'][assigned_player_id]
@@ -183,6 +200,9 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
             # Annotate the current frame with the tracking information
             # Pass detected events to annotation
             annotated_frame = self.annotate(frame, all_tracks, pass_events)
+            
+            # --- Overlay Heatmaps ---
+            annotated_frame = self._overlay_heatmaps(annotated_frame, heatmaps)
 
             # Append the annotated frame to the processed frames list
             processed_frames.append(annotated_frame)
@@ -224,6 +244,53 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
         combined_frame = self.pass_annotator.draw(combined_frame, pass_events)
 
         return combined_frame
+    
+    def _overlay_heatmaps(self, frame: np.ndarray, heatmaps: List[np.ndarray]) -> np.ndarray:
+        """
+        Overlays the movement heatmaps on the left side of the frame.
+        """
+        # Desired width for the mini-map
+        map_w = 250
+        # Calculate height based on aspect ratio of the first map (all are same size)
+        h, w = heatmaps[0].shape[:2]
+        if w > 0:
+            ratio = h / w
+            map_h = int(map_w * ratio)
+        else:
+            map_h = 150 # Fallback
+        
+        gap = 10
+        start_x = 20
+        start_y = 150 # Start below the possession bar
+        
+        labels = [f"{self.club_assigner.club1.name}", f"{self.club_assigner.club2.name}", "All"]
+        
+        for i, heatmap in enumerate(heatmaps):
+            # Resize
+            heatmap_resized = cv2.resize(heatmap, (map_w, map_h))
+            
+            # Position
+            y = start_y + i * (map_h + gap + 25) # +25 for label space
+            x = start_x
+            
+            # Check bounds
+            if y + map_h + 20 > frame.shape[0]:
+                break
+            
+            # Draw Label
+            cv2.putText(frame, labels[i], (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            
+            # Region of Interest
+            roi = frame[y:y+map_h, x:x+map_w]
+            
+            # Blend
+            alpha = 0.8
+            cv2.addWeighted(heatmap_resized, alpha, roi, 1 - alpha, 0, roi)
+            
+            # Draw border
+            cv2.rectangle(frame, (x, y), (x + map_w, y + map_h), (255, 255, 255), 1)
+            
+        return frame
     
 
     def _combine_frame_projection(self, frame: np.ndarray, projection_frame: np.ndarray) -> np.ndarray:

@@ -31,7 +31,7 @@ def main():
     # 3. Assign clubs to players based on their uniforms' colors
     # Create 'Club' objects - Needed for Player Club Assignment
     # Replace the RGB values with the actual colors of the clubs.
-    club1 = Club('AL NASSER',         # club name 
+    club1 = Club('AL NASSR',         # club name 
                  (254, 220, 0), # player jersey color
                  (126, 200, 174)      # goalkeeper jersey color
                  )
