@@ -6,10 +6,12 @@ from .projection_annotator import ProjectionAnnotator
 from position_mappers import ObjectPositionMapper
 from speed_estimation import SpeedEstimator
 from .frame_number_annotator import FrameNumberAnnotator
+from .pass_network_annotator import PassNetworkAnnotator
 from file_writing import TracksJsonWriter
 from tracking import ObjectTracker, KeypointsTracker
 from club_assignment import ClubAssigner
 from ball_to_player_assignment import BallToPlayerAssigner
+from analysis.pass_event_detector import PassEventDetector
 from utils import rgb_bgr_converter
 
 import cv2
@@ -71,6 +73,19 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
 
         self.field_image = field_image
 
+        # Initialize Pass Network components
+        self.pass_detector = PassEventDetector(possession_threshold=1)
+        
+        # Determine team colors (BGR) for annotator
+        team1_rgb = self.club_assigner.club1.player_jersey_color
+        team2_rgb = self.club_assigner.club2.player_jersey_color
+        
+        # Convert to BGR for OpenCV
+        team1_bgr = rgb_bgr_converter(team1_rgb)
+        team2_bgr = rgb_bgr_converter(team2_rgb)
+        
+        self.pass_annotator = PassNetworkAnnotator(team1_bgr, team2_bgr, field_img_path)
+
     def process(self, frames: List[np.ndarray], fps: float = 1e-6) -> List[np.ndarray]:
         """
         Processes a batch of video frames, detects and tracks objects, assigns ball possession, and annotates the frames.
@@ -107,7 +122,7 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
             all_tracks = self.obj_mapper.map(all_tracks)
 
             # Assign the ball to the closest player and calculate speed
-            all_tracks['object'], _ = self.ball_to_player_assigner.assign(
+            all_tracks['object'], assigned_player_id = self.ball_to_player_assigner.assign(
                 all_tracks['object'], self.frame_num, 
                 all_tracks['keypoints'].get(8, None),  # keypoint for player 1
                 all_tracks['keypoints'].get(24, None)  # keypoint for player 2
@@ -118,6 +133,47 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
                 all_tracks['object'], self.frame_num, self.cur_fps
             )
             
+            # --- Pass Network Logic ---
+            # Get data for pass detector
+            assigned_team_id = -1
+            if assigned_player_id != -1:
+                # Find team ID based on club name
+                # Club Assignor stores 'club' name in track
+                # PassEventDetector expects 0 or 1.
+                # We need to map club name back to 0 or 1.
+                # Helper: club1 is 0, club2 is 1
+                
+                # Check where player is found (player or goalkeeper list)
+                player_data = None
+                if assigned_player_id in all_tracks['object'].get('player', {}):
+                     player_data = all_tracks['object']['player'][assigned_player_id]
+                elif assigned_player_id in all_tracks['object'].get('goalkeeper', {}):
+                     player_data = all_tracks['object']['goalkeeper'][assigned_player_id]
+                
+                if player_data and 'club' in player_data:
+                    club_name = player_data['club']
+                    if club_name == self.club_assigner.club1.name:
+                        assigned_team_id = 0
+                    elif club_name == self.club_assigner.club2.name:
+                        assigned_team_id = 1
+
+            # Get Ball Location (2D)
+            ball_location_2d = (0.0, 0.0)
+            if 'ball' in all_tracks['object'] and all_tracks['object']['ball']:
+                 # Assuming single ball track, get the first one
+                 for _, ball_data in all_tracks['object']['ball'].items():
+                     if 'projection' in ball_data:
+                         ball_location_2d = ball_data['projection']
+                         break
+            
+            # Update Pass Detector
+            pass_events = self.pass_detector.update(
+                frame_detections=None, # Not using raw detections here
+                ball_location_2d=ball_location_2d,
+                assigned_player_id=assigned_player_id,
+                assigned_team_id=assigned_team_id
+            )
+
             # Save tracking information if saving is enabled
             if self.save_tracks_dir:
                 self._save_tracks(all_tracks)
@@ -125,7 +181,8 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
             self.frame_num += 1
 
             # Annotate the current frame with the tracking information
-            annotated_frame = self.annotate(frame, all_tracks)
+            # Pass detected events to annotation
+            annotated_frame = self.annotate(frame, all_tracks, pass_events)
 
             # Append the annotated frame to the processed frames list
             processed_frames.append(annotated_frame)
@@ -133,13 +190,14 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
         return processed_frames
 
     
-    def annotate(self, frame: np.ndarray, tracks: Dict) -> np.ndarray:
+    def annotate(self, frame: np.ndarray, tracks: Dict, pass_events: List = []) -> np.ndarray:
         """
         Annotates the given frame with analised data
 
         Args:
             frame (np.ndarray): The current video frame to be annotated.
             tracks (Dict[str, Dict[int, np.ndarray]]): A dictionary containing tracking data for objects and keypoints.
+            pass_events (List): List of pass events to annotate.
 
         Returns:
             np.ndarray: The annotated video frame.
@@ -161,6 +219,9 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
 
         # Annotate possession on the combined frame
         combined_frame = self._annotate_possession(combined_frame)
+
+        # --- Draw Pass Network ---
+        combined_frame = self.pass_annotator.draw(combined_frame, pass_events)
 
         return combined_frame
     
@@ -330,7 +391,3 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
         """
         self.writer.write(self.writer.get_object_tracks_path(), all_tracks['object'])
         self.writer.write(self.writer.get_keypoints_tracks_path(), all_tracks['keypoints'])
-
-    
-
-    
