@@ -5,10 +5,10 @@ class MovementHeatmapGenerator:
     """
     Generates movement heatmaps for football players based on their 2D field positions.
     Accumulates player positions over time to create a density map (heatmap) for each team
-    and a combined view.
+    and a combined view, overlaid on the football field image.
     """
 
-    def __init__(self, map_width, map_height, team_names, sigma=20, decay_factor=1.0):
+    def __init__(self, map_width, map_height, team_names, field_image, sigma=20, decay_factor=1.0):
         """
         Initialize the MovementHeatmapGenerator.
 
@@ -17,6 +17,7 @@ class MovementHeatmapGenerator:
             map_height (int): Height of the 2D field/map.
             team_names (list): List of two strings representing the names of the clubs 
                                (e.g., ['TeamA', 'TeamB']).
+            field_image (np.ndarray): The background image of the football field.
             sigma (int, optional): Standard deviation for the Gaussian kernel blob. Defaults to 20.
             decay_factor (float, optional): Factor to multiply the map by at each update. 
                                             1.0 means no decay (total history). Defaults to 1.0.
@@ -25,6 +26,7 @@ class MovementHeatmapGenerator:
         self.map_height = map_height
         self.team_names = team_names
         self.decay_factor = decay_factor
+        self.field_image = field_image
 
         # Initialize accumulation maps for Team 1, Team 2, and Combined
         # Using float32 for precise accumulation
@@ -119,23 +121,50 @@ class MovementHeatmapGenerator:
     def generate_heatmaps(self):
         """
         Generate the visualization images for the current state of the heatmaps.
+        Overlays the heat distribution onto the football field background.
 
         Returns:
             list: A list containing 3 BGR images [heatmap_team1, heatmap_team2, heatmap_combined].
-                  The images are color-mapped (Jet).
         """
         def process_map(heatmap_array):
-            # Avoid division by zero if map is empty
-            if np.max(heatmap_array) == 0:
-                return np.zeros((self.map_height, self.map_width, 3), dtype=np.uint8)
+            # 1. Normalize the heatmap density to 0-255 (Mask)
+            if np.max(heatmap_array) > 0:
+                norm_map = cv2.normalize(heatmap_array, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+                norm_map = norm_map.astype(np.uint8)
+            else:
+                norm_map = np.zeros((self.map_height, self.map_width), dtype=np.uint8)
+
+            # 2. Apply color map (JET)
+            # This gives us a fully colored image (Blue background for low values)
+            colored_heatmap = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
+
+            # 3. Create Mask for Alpha Blending
+            # We want low values (0) to be transparent (show the field)
+            # and high values (255) to show the heatmap color.
             
-            # Normalize to 0-255
-            norm_map = cv2.normalize(heatmap_array, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
-            norm_map = norm_map.astype(np.uint8)
+            # Simple thresholding or using the norm_map directly as alpha
+            # Using norm_map as alpha gives a smooth gradient transparency
+            alpha = norm_map.astype(float) / 255.0
             
-            # Apply color map
-            colored_map = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
-            return colored_map
+            # Expand alpha to 3 channels
+            alpha_3c = cv2.merge([alpha, alpha, alpha])
+            
+            # 4. Blend with Field Image
+            # Ensure field image is resized if it doesn't match map dimensions (though it should)
+            field = self.field_image.copy()
+            if field.shape[:2] != (self.map_height, self.map_width):
+                field = cv2.resize(field, (self.map_width, self.map_height))
+                
+            # Formula: Output = Heatmap * alpha + Field * (1 - alpha)
+            # However, standard JET has a blue background. We want the background to be the field.
+            # To fix the "Blue Box" issue, we only want to show the 'hot' colors.
+            
+            # Refined Approach:
+            # We treat the field as the base. We add the heatmap colors on top based on intensity.
+            
+            weighted_map = (colored_heatmap * alpha_3c + field * (1.0 - alpha_3c)).astype(np.uint8)
+            
+            return weighted_map
 
         return [
             process_map(self.map_team1),

@@ -91,7 +91,8 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
         self.heatmap_generator = MovementHeatmapGenerator(
             map_width=self.field_image.shape[1],
             map_height=self.field_image.shape[0],
-            team_names=[self.club_assigner.club1.name, self.club_assigner.club2.name]
+            team_names=[self.club_assigner.club1.name, self.club_assigner.club2.name],
+            field_image=self.field_image
         )
 
     def process(self, frames: List[np.ndarray], fps: float = 1e-6) -> List[np.ndarray]:
