@@ -7,12 +7,14 @@ from position_mappers import ObjectPositionMapper
 from speed_estimation import SpeedEstimator
 from .frame_number_annotator import FrameNumberAnnotator
 from .pass_network_annotator import PassNetworkAnnotator
+from .dashboard_annotator import DashboardAnnotator
 from file_writing import TracksJsonWriter
 from tracking import ObjectTracker, KeypointsTracker
 from club_assignment import ClubAssigner
 from ball_to_player_assignment import BallToPlayerAssigner
 from analysis.pass_event_detector import PassEventDetector
 from analysis.movement_heatmap_generator import MovementHeatmapGenerator
+from analysis.team_stats_manager import TeamStatsManager
 from utils import rgb_bgr_converter
 
 import cv2
@@ -95,6 +97,13 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
             field_image=self.field_image
         )
 
+        # Initialize Stats Manager and Dashboard
+        self.stats_manager = TeamStatsManager()
+        self.dashboard_annotator = DashboardAnnotator(self.stats_manager, team1_color=team1_bgr, team2_color=team2_bgr)
+        
+        # Store previous positions for distance calculation: {track_id: (x, y)}
+        self.prev_player_positions = {}
+
     def process(self, frames: List[np.ndarray], fps: float = 1e-6) -> List[np.ndarray]:
         """
         Processes a batch of video frames, detects and tracks objects, assigns ball possession, and annotates the frames.
@@ -142,6 +151,30 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
                 all_tracks['object'], self.frame_num, self.cur_fps
             )
             
+            # --- Update Stats: Distance ---
+            for obj_key in ['player', 'goalkeeper']:
+                if obj_key in all_tracks['object']:
+                    for track_id, entity_data in all_tracks['object'][obj_key].items():
+                        if 'projection' in entity_data and 'club' in entity_data:
+                            pos = entity_data['projection']
+                            club_name = entity_data['club']
+                            
+                            # Determine Team ID
+                            team_id = -1
+                            if club_name == self.club_assigner.club1.name:
+                                team_id = 1
+                            elif club_name == self.club_assigner.club2.name:
+                                team_id = 2
+                            
+                            if team_id != -1:
+                                if track_id in self.prev_player_positions:
+                                    prev_pos = self.prev_player_positions[track_id]
+                                    # Euclidean distance in pixels
+                                    dist_pixels = np.linalg.norm(np.array(pos) - np.array(prev_pos))
+                                    self.stats_manager.update_distance(team_id, dist_pixels)
+                                
+                                self.prev_player_positions[track_id] = pos
+
             # --- Heatmap Logic ---
             # Extract positions and teams for heatmap update
             heatmap_positions = {}
@@ -175,6 +208,12 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
                     elif club_name == self.club_assigner.club2.name:
                         assigned_team_id = 1
 
+            # Update Possession Stats
+            # Get latest possession stats from the assigner (returns percentages 0.0-1.0)
+            possession_data = self.ball_to_player_assigner.get_ball_possessions()[-1]
+            # possession_data[0] is Club 1 (Team 1), possession_data[1] is Club 2 (Team 2)
+            self.stats_manager.set_possession_stats(possession_data[0], possession_data[1])
+
             # Get Ball Location (2D)
             ball_location_2d = (0.0, 0.0)
             if 'ball' in all_tracks['object'] and all_tracks['object']['ball']:
@@ -192,6 +231,12 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
                 assigned_team_id=assigned_team_id
             )
 
+            # Update Pass/Interception Stats
+            for event in pass_events:
+                # event.team_id is 0 or 1.
+                team_id = event.team_id + 1
+                self.stats_manager.update_pass_event(event.type.lower(), team_id)
+
             # Save tracking information if saving is enabled
             if self.save_tracks_dir:
                 self._save_tracks(all_tracks)
@@ -204,6 +249,9 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
             
             # --- Overlay Heatmaps ---
             annotated_frame = self._overlay_heatmaps(annotated_frame, heatmaps)
+
+            # --- Draw Dashboard ---
+            annotated_frame = self.dashboard_annotator.draw_dashboard(annotated_frame)
 
             # Append the annotated frame to the processed frames list
             processed_frames.append(annotated_frame)
