@@ -79,8 +79,8 @@ def main():
     # Specify the input video path and the output video path. 
     # The batch_size determines how many frames are processed in one go.
     process_video(processor,                                # Created FootballVideoProcessor object
-                  video_source= r'C:\Prototype-Football\football_analysis\input_videos\c1.mp4', # Video source (in this case video file path)
-                  output_video= r'C:\Prototype-Football\football_analysis\output_videos\c1_out.mp4',    # Output video path (Optional)
+                  video_source= r'C:\Prototype-Football\football_analysis\input_videos\c2.mp4', # Video source (in this case video file path)
+                  output_video= r'C:\Prototype-Football\football_analysis\output_videos\c2_out.mp4',    # Output video path (Optional)
                   batch_size= 8                             # Number of frames to process at once
                   )
 

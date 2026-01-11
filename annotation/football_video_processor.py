@@ -8,6 +8,7 @@ from speed_estimation import SpeedEstimator
 from .frame_number_annotator import FrameNumberAnnotator
 from .pass_network_annotator import PassNetworkAnnotator
 from .dashboard_annotator import DashboardAnnotator
+from .formation_annotator import FormationAnnotator
 from file_writing import TracksJsonWriter
 from tracking import ObjectTracker, KeypointsTracker
 from club_assignment import ClubAssigner
@@ -15,6 +16,7 @@ from ball_to_player_assignment import BallToPlayerAssigner
 from analysis.pass_event_detector import PassEventDetector
 from analysis.movement_heatmap_generator import MovementHeatmapGenerator
 from analysis.team_stats_manager import TeamStatsManager
+from analysis.formation_detector import FormationDetector
 from utils import rgb_bgr_converter
 
 import cv2
@@ -88,6 +90,14 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
         team2_bgr = rgb_bgr_converter(team2_rgb)
         
         self.pass_annotator = PassNetworkAnnotator(team1_bgr, team2_bgr, field_img_path)
+        
+        # Initialize Formation Annotator
+        self.formation_annotator = FormationAnnotator(
+            team1_name=self.club_assigner.club1.name,
+            team2_name=self.club_assigner.club2.name,
+            team1_color=team1_bgr,
+            team2_color=team2_bgr
+        )
 
         # Initialize Heatmap Generator
         self.heatmap_generator = MovementHeatmapGenerator(
@@ -100,6 +110,10 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
         # Initialize Stats Manager and Dashboard
         self.stats_manager = TeamStatsManager()
         self.dashboard_annotator = DashboardAnnotator(self.stats_manager, team1_color=team1_bgr, team2_color=team2_bgr)
+        
+        # Initialize Formation Detector
+        self.formation_detector = FormationDetector()
+        self.team_formations = {1: "Analyzing...", 2: "Analyzing..."}
         
         # Store previous positions for distance calculation: {track_id: (x, y)}
         self.prev_player_positions = {}
@@ -151,7 +165,9 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
                 all_tracks['object'], self.frame_num, self.cur_fps
             )
             
-            # --- Update Stats: Distance ---
+            # --- Update Stats: Distance & Prepare for Formation Detection ---
+            formation_update_list = []
+            
             for obj_key in ['player', 'goalkeeper']:
                 if obj_key in all_tracks['object']:
                     for track_id, entity_data in all_tracks['object'][obj_key].items():
@@ -167,6 +183,7 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
                                 team_id = 2
                             
                             if team_id != -1:
+                                # Distance Stats
                                 if track_id in self.prev_player_positions:
                                     prev_pos = self.prev_player_positions[track_id]
                                     # Euclidean distance in pixels
@@ -174,6 +191,21 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
                                     self.stats_manager.update_distance(team_id, dist_pixels)
                                 
                                 self.prev_player_positions[track_id] = pos
+                                
+                                # Formation Detection (Outfield players only)
+                                if obj_key == 'player':
+                                    formation_update_list.append({
+                                        'team_id': team_id,
+                                        'position': pos
+                                    })
+
+            # Update Formation Detector
+            self.formation_detector.update(formation_update_list, self.frame_num)
+            
+            # Compute Formation periodically (every 30 frames)
+            if self.frame_num % 30 == 0:
+                self.team_formations[1] = self.formation_detector.compute_formation(1)
+                self.team_formations[2] = self.formation_detector.compute_formation(2)
 
             # --- Heatmap Logic ---
             # Extract positions and teams for heatmap update
@@ -252,6 +284,9 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
 
             # --- Draw Dashboard ---
             annotated_frame = self.dashboard_annotator.draw_dashboard(annotated_frame)
+            
+            # --- Draw Formation Info ---
+            annotated_frame = self.formation_annotator.draw(annotated_frame, self.team_formations)
 
             # Append the annotated frame to the processed frames list
             processed_frames.append(annotated_frame)
