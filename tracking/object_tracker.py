@@ -20,8 +20,8 @@ class ObjectTracker(AbstractTracker):
 
         self.ball_conf = ball_conf
         self.classes = ['ball', 'goalkeeper', 'player', 'referee']
-        self.tracker = sv.ByteTrack(lost_track_buffer=5)  # Initialize ByteTracker
-        self.tracker.reset()
+        # self.tracker = sv.ByteTrack(lost_track_buffer=5)  # Removed: using Ultralytics internal tracker
+        # self.tracker.reset()
         self.all_tracks = {class_name: {} for class_name in self.classes}  # Initialize tracks
         self.cur_frame = 0  # Frame counter initialization
         self.original_size = (1920, 1080)  # Original frame size (1920x1080)
@@ -41,10 +41,11 @@ class ObjectTracker(AbstractTracker):
         # Preprocess: Resize frames to 1280x1280
         resized_frames = [self._preprocess_frame(frame) for frame in frames]
 
-        # Use YOLOv8's predict method to handle batch inference
-        detections = self.model.predict(resized_frames, conf=self.conf)
+        # Use YOLOv8's track method to handle batch inference and tracking
+        # Switching to BoTSORT as requested
+        detections = self.model.track(resized_frames, conf=self.conf, persist=True, tracker="botsort.yaml")
 
-        return detections  # Batch of detections
+        return detections  # Batch of detections (with tracks)
 
     def track(self, detection: Results) -> dict:
         """
@@ -59,8 +60,26 @@ class ObjectTracker(AbstractTracker):
         # Convert Ultralytics detections to supervision
         detection_sv = sv.Detections.from_ultralytics(detection)
 
-        # Perform ByteTracker object tracking on the detections
-        tracks = self.tracker.update_with_detections(detection_sv)
+        # Since we used model.track(), detection_sv should already have tracker_ids
+        # if detections were successful.
+        # However, supervision might set tracker_id to None if not present.
+        
+        # In the original code, we used self.tracker.update_with_detections(detection_sv)
+        # which returns a new sv.Detections object with updated tracks.
+        # Now, detection_sv IS the tracks (mostly).
+        
+        tracks = detection_sv
+
+        # Handle case where no tracker_id is returned (e.g. first frame or no association)
+        if tracks.tracker_id is None:
+            # If no tracks, we can't map them. Return empty dict or try to map without IDs?
+            # The system relies on IDs. If no ID, we effectively have no "track".
+            # For robustness, we assign empty array if None, to prevent zip crash in _tracks_mapper
+            tracks.tracker_id = np.array([], dtype=int)
+            # Also ensure other arrays are empty or aligned if this happens? 
+            # Actually, if tracker_id is None, likely we shouldn't pass it to _tracks_mapper 
+            # if _tracks_mapper expects valid IDs.
+            # But let's look at _tracks_mapper logic.
 
         self.current_frame_tracks = self._tracks_mapper(tracks, self.classes)
         

@@ -223,6 +223,3 @@ def process_video(processor = None, video_source: str = 0, output_video: Optiona
         finally:
             cap.release()
             cv2.destroyAllWindows()
-
-    print("Video processing completed. Program will now exit.")
-    os._exit(0)  # Force exit the program

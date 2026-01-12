@@ -6,14 +6,22 @@ from .projection_annotator import ProjectionAnnotator
 from position_mappers import ObjectPositionMapper
 from speed_estimation import SpeedEstimator
 from .frame_number_annotator import FrameNumberAnnotator
+from .pass_network_annotator import PassNetworkAnnotator
+from .dashboard_annotator import DashboardAnnotator
+from .formation_annotator import FormationAnnotator
 from file_writing import TracksJsonWriter
 from tracking import ObjectTracker, KeypointsTracker
 from club_assignment import ClubAssigner
 from ball_to_player_assignment import BallToPlayerAssigner
+from analysis.pass_event_detector import PassEventDetector
+from analysis.movement_heatmap_generator import MovementHeatmapGenerator
+from analysis.team_stats_manager import TeamStatsManager
+from analysis.formation_detector import FormationDetector
 from utils import rgb_bgr_converter
 
 import cv2
 import numpy as np
+import os
 from typing import List, Dict, Optional, Tuple
 
 class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
@@ -71,6 +79,46 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
 
         self.field_image = field_image
 
+        # Initialize Pass Network components
+        self.pass_detector = PassEventDetector(possession_threshold=1)
+        
+        # Determine team colors (BGR) for annotator
+        team1_rgb = self.club_assigner.club1.player_jersey_color
+        team2_rgb = self.club_assigner.club2.player_jersey_color
+        
+        # Convert to BGR for OpenCV
+        team1_bgr = rgb_bgr_converter(team1_rgb)
+        team2_bgr = rgb_bgr_converter(team2_rgb)
+        
+        self.pass_annotator = PassNetworkAnnotator(team1_bgr, team2_bgr, field_img_path)
+        
+        # Initialize Formation Annotator
+        self.formation_annotator = FormationAnnotator(
+            team1_name=self.club_assigner.club1.name,
+            team2_name=self.club_assigner.club2.name,
+            team1_color=team1_bgr,
+            team2_color=team2_bgr
+        )
+
+        # Initialize Heatmap Generator
+        self.heatmap_generator = MovementHeatmapGenerator(
+            map_width=self.field_image.shape[1],
+            map_height=self.field_image.shape[0],
+            team_names=[self.club_assigner.club1.name, self.club_assigner.club2.name],
+            field_image=self.field_image
+        )
+
+        # Initialize Stats Manager and Dashboard
+        self.stats_manager = TeamStatsManager()
+        self.dashboard_annotator = DashboardAnnotator(self.stats_manager, team1_color=team1_bgr, team2_color=team2_bgr)
+        
+        # Initialize Formation Detector
+        self.formation_detector = FormationDetector()
+        self.team_formations = {1: "Analyzing...", 2: "Analyzing..."}
+        
+        # Store previous positions for distance calculation: {track_id: (x, y)}
+        self.prev_player_positions = {}
+
     def process(self, frames: List[np.ndarray], fps: float = 1e-6) -> List[np.ndarray]:
         """
         Processes a batch of video frames, detects and tracks objects, assigns ball possession, and annotates the frames.
@@ -107,7 +155,7 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
             all_tracks = self.obj_mapper.map(all_tracks)
 
             # Assign the ball to the closest player and calculate speed
-            all_tracks['object'], _ = self.ball_to_player_assigner.assign(
+            all_tracks['object'], assigned_player_id = self.ball_to_player_assigner.assign(
                 all_tracks['object'], self.frame_num, 
                 all_tracks['keypoints'].get(8, None),  # keypoint for player 1
                 all_tracks['keypoints'].get(24, None)  # keypoint for player 2
@@ -118,6 +166,110 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
                 all_tracks['object'], self.frame_num, self.cur_fps
             )
             
+            # --- Update Stats: Distance & Prepare for Formation Detection ---
+            formation_update_list = []
+            
+            for obj_key in ['player', 'goalkeeper']:
+                if obj_key in all_tracks['object']:
+                    for track_id, entity_data in all_tracks['object'][obj_key].items():
+                        if 'projection' in entity_data and 'club' in entity_data:
+                            pos = entity_data['projection']
+                            club_name = entity_data['club']
+                            
+                            # Determine Team ID
+                            team_id = -1
+                            if club_name == self.club_assigner.club1.name:
+                                team_id = 1
+                            elif club_name == self.club_assigner.club2.name:
+                                team_id = 2
+                            
+                            if team_id != -1:
+                                # Distance Stats
+                                if track_id in self.prev_player_positions:
+                                    prev_pos = self.prev_player_positions[track_id]
+                                    # Euclidean distance in pixels
+                                    dist_pixels = np.linalg.norm(np.array(pos) - np.array(prev_pos))
+                                    self.stats_manager.update_distance(team_id, dist_pixels)
+                                
+                                self.prev_player_positions[track_id] = pos
+                                
+                                # Formation Detection (Outfield players only)
+                                if obj_key == 'player':
+                                    formation_update_list.append({
+                                        'team_id': team_id,
+                                        'position': pos
+                                    })
+
+            # Update Formation Detector
+            self.formation_detector.update(formation_update_list, self.frame_num)
+            
+            # Compute Formation periodically (every 30 frames)
+            if self.frame_num % 30 == 0:
+                self.team_formations[1] = self.formation_detector.compute_formation(1)
+                self.team_formations[2] = self.formation_detector.compute_formation(2)
+
+            # --- Heatmap Logic ---
+            # Extract positions and teams for heatmap update
+            heatmap_positions = {}
+            heatmap_teams = {}
+            for obj_key in ['player', 'goalkeeper']:
+                if obj_key in all_tracks['object']:
+                    for track_id, entity_data in all_tracks['object'][obj_key].items():
+                        if 'projection' in entity_data and 'club' in entity_data:
+                            heatmap_positions[track_id] = entity_data['projection']
+                            heatmap_teams[track_id] = entity_data['club']
+            
+            self.heatmap_generator.update(heatmap_positions, heatmap_teams)
+            heatmaps = self.heatmap_generator.generate_heatmaps()
+            # ---------------------
+            
+            # --- Pass Network Logic ---
+            # Get data for pass detector
+            assigned_team_id = -1
+            if assigned_player_id != -1:
+                # Find team ID based on club name
+                player_data = None
+                if assigned_player_id in all_tracks['object'].get('player', {}):
+                     player_data = all_tracks['object']['player'][assigned_player_id]
+                elif assigned_player_id in all_tracks['object'].get('goalkeeper', {}):
+                     player_data = all_tracks['object']['goalkeeper'][assigned_player_id]
+                
+                if player_data and 'club' in player_data:
+                    club_name = player_data['club']
+                    if club_name == self.club_assigner.club1.name:
+                        assigned_team_id = 0
+                    elif club_name == self.club_assigner.club2.name:
+                        assigned_team_id = 1
+
+            # Update Possession Stats
+            # Get latest possession stats from the assigner (returns percentages 0.0-1.0)
+            possession_data = self.ball_to_player_assigner.get_ball_possessions()[-1]
+            # possession_data[0] is Club 1 (Team 1), possession_data[1] is Club 2 (Team 2)
+            self.stats_manager.set_possession_stats(possession_data[0], possession_data[1])
+
+            # Get Ball Location (2D)
+            ball_location_2d = (0.0, 0.0)
+            if 'ball' in all_tracks['object'] and all_tracks['object']['ball']:
+                 # Assuming single ball track, get the first one
+                 for _, ball_data in all_tracks['object']['ball'].items():
+                     if 'projection' in ball_data:
+                         ball_location_2d = ball_data['projection']
+                         break
+            
+            # Update Pass Detector
+            pass_events = self.pass_detector.update(
+                frame_detections=None, # Not using raw detections here
+                ball_location_2d=ball_location_2d,
+                assigned_player_id=assigned_player_id,
+                assigned_team_id=assigned_team_id
+            )
+
+            # Update Pass/Interception Stats
+            for event in pass_events:
+                # event.team_id is 0 or 1.
+                team_id = event.team_id + 1
+                self.stats_manager.update_pass_event(event.type.lower(), team_id)
+
             # Save tracking information if saving is enabled
             if self.save_tracks_dir:
                 self._save_tracks(all_tracks)
@@ -125,7 +277,17 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
             self.frame_num += 1
 
             # Annotate the current frame with the tracking information
-            annotated_frame = self.annotate(frame, all_tracks)
+            # Pass detected events to annotation
+            annotated_frame = self.annotate(frame, all_tracks, pass_events)
+            
+            # --- Overlay Heatmaps ---
+            annotated_frame = self._overlay_heatmaps(annotated_frame, heatmaps)
+
+            # --- Draw Dashboard ---
+            annotated_frame = self.dashboard_annotator.draw_dashboard(annotated_frame)
+            
+            # --- Draw Formation Info ---
+            annotated_frame = self.formation_annotator.draw(annotated_frame, self.team_formations)
 
             # Append the annotated frame to the processed frames list
             processed_frames.append(annotated_frame)
@@ -133,13 +295,14 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
         return processed_frames
 
     
-    def annotate(self, frame: np.ndarray, tracks: Dict) -> np.ndarray:
+    def annotate(self, frame: np.ndarray, tracks: Dict, pass_events: List = []) -> np.ndarray:
         """
         Annotates the given frame with analised data
 
         Args:
             frame (np.ndarray): The current video frame to be annotated.
             tracks (Dict[str, Dict[int, np.ndarray]]): A dictionary containing tracking data for objects and keypoints.
+            pass_events (List): List of pass events to annotate.
 
         Returns:
             np.ndarray: The annotated video frame.
@@ -162,7 +325,57 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
         # Annotate possession on the combined frame
         combined_frame = self._annotate_possession(combined_frame)
 
+        # --- Draw Pass Network ---
+        combined_frame = self.pass_annotator.draw(combined_frame, pass_events)
+
         return combined_frame
+    
+    def _overlay_heatmaps(self, frame: np.ndarray, heatmaps: List[np.ndarray]) -> np.ndarray:
+        """
+        Overlays the movement heatmaps on the left side of the frame.
+        """
+        # Desired width for the mini-map
+        map_w = 250
+        # Calculate height based on aspect ratio of the first map (all are same size)
+        h, w = heatmaps[0].shape[:2]
+        if w > 0:
+            ratio = h / w
+            map_h = int(map_w * ratio)
+        else:
+            map_h = 150 # Fallback
+        
+        gap = 10
+        start_x = 20
+        start_y = 150 # Start below the possession bar
+        
+        labels = [f"{self.club_assigner.club1.name}", f"{self.club_assigner.club2.name}", "All"]
+        
+        for i, heatmap in enumerate(heatmaps):
+            # Resize
+            heatmap_resized = cv2.resize(heatmap, (map_w, map_h))
+            
+            # Position
+            y = start_y + i * (map_h + gap + 25) # +25 for label space
+            x = start_x
+            
+            # Check bounds
+            if y + map_h + 20 > frame.shape[0]:
+                break
+            
+            # Draw Label
+            cv2.putText(frame, labels[i], (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            
+            # Region of Interest
+            roi = frame[y:y+map_h, x:x+map_w]
+            
+            # Blend
+            alpha = 0.8
+            cv2.addWeighted(heatmap_resized, alpha, roi, 1 - alpha, 0, roi)
+            
+            # Draw border
+            cv2.rectangle(frame, (x, y), (x + map_w, y + map_h), (255, 255, 255), 1)
+            
+        return frame
     
 
     def _combine_frame_projection(self, frame: np.ndarray, projection_frame: np.ndarray) -> np.ndarray:
@@ -284,6 +497,86 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
         return frame
     
 
+    def save_final_artifacts(self, output_dir: str) -> None:
+        """
+        Saves the final analysis artifacts (heatmaps, pass network, stats) to files.
+
+        Args:
+            output_dir (str): Directory where the files will be saved.
+        """
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        # 1. Save Heatmaps
+        heatmaps = self.heatmap_generator.get_final_heatmaps()
+        # heatmaps = [team1, team2, combined]
+        team1_name = self.club_assigner.club1.name
+        team2_name = self.club_assigner.club2.name
+        
+        cv2.imwrite(os.path.join(output_dir, f"heatmap_{team1_name}.png"), heatmaps[0])
+        cv2.imwrite(os.path.join(output_dir, f"heatmap_{team2_name}.png"), heatmaps[1])
+        cv2.imwrite(os.path.join(output_dir, "heatmap_combined.png"), heatmaps[2])
+        
+        # 2. Save Pass Network
+        pass_net_img = self.pass_annotator.get_final_network_image()
+        cv2.imwrite(os.path.join(output_dir, "pass_network.png"), pass_net_img)
+        
+        # 3. Save HTML Stats Report
+        stats1 = self.stats_manager.get_stats(1)
+        stats2 = self.stats_manager.get_stats(2)
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Match Analysis Report</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                table {{ border-collapse: collapse; width: 100%; max_width: 800px; }}
+                th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
+                th {{ background-color: #f2f2f2; }}
+                h1 {{ color: #333; }}
+                .team-header {{ font-weight: bold; font-size: 1.2em; }}
+            </style>
+        </head>
+        <body>
+            <h1>Match Analysis Report</h1>
+            <table>
+                <tr>
+                    <th>Statistic</th>
+                    <th>{team1_name}</th>
+                    <th>{team2_name}</th>
+                </tr>
+                <tr>
+                    <td>Total Passes</td>
+                    <td>{stats1.get('total_passes', 0)}</td>
+                    <td>{stats2.get('total_passes', 0)}</td>
+                </tr>
+                <tr>
+                    <td>Pass Completion Rate</td>
+                    <td>{stats1.get('pass_completion_rate', 0)}%</td>
+                    <td>{stats2.get('pass_completion_rate', 0)}%</td>
+                </tr>
+                <tr>
+                    <td>Possession</td>
+                    <td>{stats1.get('possession_percentage', 0)}%</td>
+                    <td>{stats2.get('possession_percentage', 0)}%</td>
+                </tr>
+                 <tr>
+                    <td>Total Distance Covered (px)</td>
+                    <td>{stats1.get('total_distance_pixels', 0)}</td>
+                    <td>{stats2.get('total_distance_pixels', 0)}</td>
+                </tr>
+            </table>
+        </body>
+        </html>
+        """
+        
+        with open(os.path.join(output_dir, "match_stats.html"), "w") as f:
+            f.write(html_content)
+
+        print(f"Artifacts saved to {output_dir}")
+
     def _display_possession_text(self, frame: np.ndarray, club1_width: int, club2_width: int,
                                   neutral_width: int, bar_x: int, bar_y: int, 
                                  possession_club1_text: str, possession_club2_text: str, 
@@ -330,7 +623,3 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
         """
         self.writer.write(self.writer.get_object_tracks_path(), all_tracks['object'])
         self.writer.write(self.writer.get_keypoints_tracks_path(), all_tracks['keypoints'])
-
-    
-
-    
