@@ -513,8 +513,12 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
         team1_name = self.club_assigner.club1.name
         team2_name = self.club_assigner.club2.name
         
-        cv2.imwrite(os.path.join(output_dir, f"heatmap_{team1_name}.png"), heatmaps[0])
-        cv2.imwrite(os.path.join(output_dir, f"heatmap_{team2_name}.png"), heatmaps[1])
+        # Clean filenames for saving (handle spaces if any)
+        t1_safe = team1_name.replace(" ", "_")
+        t2_safe = team2_name.replace(" ", "_")
+
+        cv2.imwrite(os.path.join(output_dir, f"heatmap_{t1_safe}.png"), heatmaps[0])
+        cv2.imwrite(os.path.join(output_dir, f"heatmap_{t2_safe}.png"), heatmaps[1])
         cv2.imwrite(os.path.join(output_dir, "heatmap_combined.png"), heatmaps[2])
         
         # 2. Save Pass Network
@@ -525,49 +529,271 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
         stats1 = self.stats_manager.get_stats(1)
         stats2 = self.stats_manager.get_stats(2)
         
+        # Get Team Colors for HTML
+        t1_rgb = self.club_assigner.club1.player_jersey_color
+        t2_rgb = self.club_assigner.club2.player_jersey_color
+        t1_hex = "#{:02x}{:02x}{:02x}".format(*t1_rgb)
+        t2_hex = "#{:02x}{:02x}{:02x}".format(*t2_rgb)
+
         html_content = f"""
         <!DOCTYPE html>
-        <html>
+        <html lang="en">
         <head>
-            <title>Match Analysis Report</title>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Tactical Match Report: {team1_name} vs {team2_name}</title>
             <style>
-                body {{ font-family: Arial, sans-serif; margin: 40px; }}
-                table {{ border-collapse: collapse; width: 100%; max_width: 800px; }}
-                th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
-                th {{ background-color: #f2f2f2; }}
-                h1 {{ color: #333; }}
-                .team-header {{ font-weight: bold; font-size: 1.2em; }}
+                :root {{
+                    --primary-color: #2c3e50;
+                    --secondary-color: #34495e;
+                    --accent-color: #3498db;
+                    --text-color: #333;
+                    --bg-color: #f4f7f6;
+                    --card-bg: #ffffff;
+                    --team1-color: {t1_hex};
+                    --team2-color: {t2_hex};
+                }}
+                body {{
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background-color: var(--bg-color);
+                    color: var(--text-color);
+                    margin: 0;
+                    padding: 0;
+                    line-height: 1.6;
+                }}
+                .container {{
+                    max-width: 1200px;
+                    margin: 0 auto;
+                    padding: 20px;
+                }}
+                header {{
+                    background-color: var(--primary-color);
+                    color: white;
+                    padding: 20px 0;
+                    text-align: center;
+                    margin-bottom: 30px;
+                    border-radius: 0 0 10px 10px;
+                    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+                }}
+                h1 {{ margin: 0; font-size: 2.5em; }}
+                h2 {{ color: var(--secondary-color); border-bottom: 2px solid var(--accent-color); padding-bottom: 10px; margin-top: 40px; }}
+                .match-info {{ font-size: 1.2em; opacity: 0.9; margin-top: 5px; }}
+                
+                /* KPI Cards */
+                .kpi-grid {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                    gap: 20px;
+                    margin-bottom: 40px;
+                }}
+                .kpi-card {{
+                    background: var(--card-bg);
+                    padding: 20px;
+                    border-radius: 10px;
+                    box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+                    text-align: center;
+                    border-top: 4px solid var(--accent-color);
+                }}
+                .kpi-value {{ font-size: 2em; font-weight: bold; color: var(--primary-color); }}
+                .kpi-label {{ font-size: 0.9em; color: #7f8c8d; text-transform: uppercase; letter-spacing: 1px; }}
+                .team-split {{ display: flex; justify-content: space-between; margin-top: 10px; font-size: 0.9em; }}
+                .team-split span {{ font-weight: bold; }}
+                
+                /* Visualizations */
+                .viz-section {{
+                    background: var(--card-bg);
+                    padding: 30px;
+                    border-radius: 10px;
+                    box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+                    margin-bottom: 30px;
+                }}
+                .viz-container {{
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 20px;
+                    justify-content: center;
+                    margin-top: 20px;
+                }}
+                .viz-item {{
+                    flex: 1;
+                    min-width: 300px;
+                    text-align: center;
+                }}
+                .viz-item img {{
+                    max-width: 100%;
+                    height: auto;
+                    border-radius: 8px;
+                    border: 1px solid #ddd;
+                    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+                    transition: transform 0.3s ease;
+                }}
+                .viz-item img:hover {{ transform: scale(1.02); }}
+                .viz-desc {{
+                    margin-top: 15px;
+                    font-style: italic;
+                    color: #555;
+                }}
+
+                /* Stats Table */
+                table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin-top: 20px;
+                    background: white;
+                    border-radius: 10px;
+                    overflow: hidden;
+                    box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+                }}
+                th, td {{ padding: 15px; text-align: center; }}
+                th {{ background-color: var(--secondary-color); color: white; text-transform: uppercase; font-size: 0.9em; }}
+                tr:nth-child(even) {{ background-color: #f9f9f9; }}
+                tr:hover {{ background-color: #f1f1f1; }}
+                .team-col {{ font-weight: bold; color: var(--primary-color); }}
+                
+                footer {{
+                    text-align: center;
+                    margin-top: 50px;
+                    padding: 20px;
+                    color: #95a5a6;
+                    font-size: 0.8em;
+                }}
             </style>
         </head>
         <body>
-            <h1>Match Analysis Report</h1>
-            <table>
-                <tr>
-                    <th>Statistic</th>
-                    <th>{team1_name}</th>
-                    <th>{team2_name}</th>
-                </tr>
-                <tr>
-                    <td>Total Passes</td>
-                    <td>{stats1.get('total_passes', 0)}</td>
-                    <td>{stats2.get('total_passes', 0)}</td>
-                </tr>
-                <tr>
-                    <td>Pass Completion Rate</td>
-                    <td>{stats1.get('pass_completion_rate', 0)}%</td>
-                    <td>{stats2.get('pass_completion_rate', 0)}%</td>
-                </tr>
-                <tr>
-                    <td>Possession</td>
-                    <td>{stats1.get('possession_percentage', 0)}%</td>
-                    <td>{stats2.get('possession_percentage', 0)}%</td>
-                </tr>
-                 <tr>
-                    <td>Total Distance Covered (px)</td>
-                    <td>{stats1.get('total_distance_pixels', 0)}</td>
-                    <td>{stats2.get('total_distance_pixels', 0)}</td>
-                </tr>
-            </table>
+            <header>
+                <h1>Match Analysis Report</h1>
+                <div class="match-info">{team1_name} vs {team2_name}</div>
+            </header>
+
+            <div class="container">
+                
+                <!-- KPI Cards -->
+                <div class="kpi-grid">
+                    <div class="kpi-card">
+                        <div class="kpi-label">Possession</div>
+                        <div class="team-split">
+                            <span style="color: var(--team1-color);">{team1_name}: {stats1.get('possession_percentage')}%</span>
+                            <span style="color: var(--team2-color);">{team2_name}: {stats2.get('possession_percentage')}%</span>
+                        </div>
+                        <div style="margin-top:10px; height: 10px; background: #eee; border-radius:5px; overflow:hidden; display:flex;">
+                            <div style="width: {stats1.get('possession_percentage')}%; background: var(--team1-color);"></div>
+                            <div style="width: {stats2.get('possession_percentage')}%; background: var(--team2-color);"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="kpi-card">
+                        <div class="kpi-label">Total Passes</div>
+                        <div class="kpi-value">{stats1.get('total_passes', 0) + stats2.get('total_passes', 0)}</div>
+                        <div class="team-split">
+                            <span style="color: var(--team1-color);">{team1_name}: {stats1.get('total_passes', 0)}</span>
+                            <span style="color: var(--team2-color);">{team2_name}: {stats2.get('total_passes', 0)}</span>
+                        </div>
+                    </div>
+
+                    <div class="kpi-card">
+                        <div class="kpi-label">Pass Completion</div>
+                        <div class="kpi-value">{(stats1.get('pass_completion_rate', 0) + stats2.get('pass_completion_rate', 0)) / 2:.1f}%</div>
+                         <div class="team-split">
+                            <span style="color: var(--team1-color);">{team1_name}: {stats1.get('pass_completion_rate', 0)}%</span>
+                            <span style="color: var(--team2-color);">{team2_name}: {stats2.get('pass_completion_rate', 0)}%</span>
+                        </div>
+                    </div>
+
+                    <div class="kpi-card">
+                        <div class="kpi-label">Work Rate (Movement)</div>
+                        <div class="team-split">
+                            <span style="color: var(--team1-color);">{team1_name}: {int(stats1.get('total_distance_pixels', 0)):,} units</span>
+                        </div>
+                        <div class="team-split">
+                             <span style="color: var(--team2-color);">{team2_name}: {int(stats2.get('total_distance_pixels', 0)):,} units</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Heatmaps -->
+                <h2>Spatial Control: Heatmaps</h2>
+                <div class="viz-section">
+                    <p>Heatmaps visualize the density of player movement over the course of the match. Brighter areas (Red/Yellow) indicate zones of high activity and control.</p>
+                    
+                    <div class="viz-container">
+                        <div class="viz-item" style="flex-basis: 100%;">
+                            <h3>Combined Match Intensity</h3>
+                            <img src="heatmap_combined.png" alt="Combined Heatmap">
+                        </div>
+                    </div>
+                    <div class="viz-container">
+                        <div class="viz-item">
+                            <h3>{team1_name} Activity</h3>
+                            <img src="heatmap_{t1_safe}.png" alt="{team1_name} Heatmap">
+                        </div>
+                        <div class="viz-item">
+                            <h3>{team2_name} Activity</h3>
+                            <img src="heatmap_{t2_safe}.png" alt="{team2_name} Heatmap">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Pass Network -->
+                <h2>Tactical Structure: Pass Network</h2>
+                <div class="viz-section">
+                    <div class="viz-container">
+                        <div class="viz-item" style="flex-basis: 60%;">
+                            <img src="pass_network.png" alt="Pass Network">
+                        </div>
+                        <div class="viz-item" style="flex-basis: 35%; text-align: left; align-self: center;">
+                            <h3>Understanding the Network</h3>
+                            <ul style="list-style-type: square; color: #555; padding-left: 20px;">
+                                <li style="margin-bottom: 10px;"><strong>Nodes (Circles):</strong> Represent the average location where a player receives the ball. Larger nodes indicate more involvement.</li>
+                                <li style="margin-bottom: 10px;"><strong>Edges (Lines):</strong> Represent successful passes between players. Thicker lines indicate a stronger passing relationship (higher volume).</li>
+                                <li><strong>Structure:</strong> This graph reveals the team's shape and passing lanes. Look for triangles and central hubs.</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Detailed Stats Table -->
+                <h2>Detailed Statistics</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>{team1_name}</th>
+                            <th>{team2_name}</th>
+                            <th>Difference</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Possession</td>
+                            <td class="team-col">{stats1.get('possession_percentage')}%</td>
+                            <td class="team-col">{stats2.get('possession_percentage')}%</td>
+                            <td>{abs(stats1.get('possession_percentage') - stats2.get('possession_percentage')):.1f}%</td>
+                        </tr>
+                        <tr>
+                            <td>Total Passes</td>
+                            <td class="team-col">{stats1.get('total_passes')}</td>
+                            <td class="team-col">{stats2.get('total_passes')}</td>
+                            <td>{abs(stats1.get('total_passes') - stats2.get('total_passes'))}</td>
+                        </tr>
+                        <tr>
+                            <td>Pass Completion Rate</td>
+                            <td class="team-col">{stats1.get('pass_completion_rate')}%</td>
+                            <td class="team-col">{stats2.get('pass_completion_rate')}%</td>
+                            <td>{abs(stats1.get('pass_completion_rate') - stats2.get('pass_completion_rate')):.1f}%</td>
+                        </tr>
+                         <tr>
+                            <td>Total Movement (Units)</td>
+                            <td class="team-col">{int(stats1.get('total_distance_pixels', 0)):,}</td>
+                            <td class="team-col">{int(stats2.get('total_distance_pixels', 0)):,}</td>
+                            <td>{abs(int(stats1.get('total_distance_pixels', 0)) - int(stats2.get('total_distance_pixels', 0))):,}</td>
+                        </tr>
+                    </tbody>
+                </table>
+                
+                <footer>
+                    Generated by AI Football Analysis Engine | Prototype-Football
+                </footer>
+            </div>
         </body>
         </html>
         """
