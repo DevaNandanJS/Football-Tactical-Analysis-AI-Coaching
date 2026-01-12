@@ -28,6 +28,39 @@ class PassNetworkAnnotator:
             
         self.events: List[Event] = []
 
+    def get_final_network_image(self) -> np.ndarray:
+        """
+        Generates a standalone image of the final pass network on the field.
+        """
+        canvas = self.field_image.copy()
+
+        for event in self.events:
+            if event.start_xy is None or event.end_xy is None:
+                continue
+            
+            start_pt = (int(event.start_xy[0]), int(event.start_xy[1]))
+            end_pt = (int(event.end_xy[0]), int(event.end_xy[1]))
+
+            if event.team_id == 0:
+                color = self.team1_color
+            else:
+                color = self.team2_color
+
+            if event.type == "PASS":
+                cv2.line(canvas, start_pt, end_pt, color, 2)
+                cv2.circle(canvas, end_pt, 5, color, -1)
+                
+            elif event.type == "INTERCEPTION":
+                mixed_color = (
+                    int((self.team1_color[0] + self.team2_color[0]) / 2),
+                    int((self.team1_color[1] + self.team2_color[1]) / 2),
+                    int((self.team1_color[2] + self.team2_color[2]) / 2)
+                )
+                cv2.line(canvas, start_pt, end_pt, mixed_color, 2)
+                cv2.circle(canvas, end_pt, 5, mixed_color, -1)
+                
+        return canvas
+
     def draw(self, frame: np.ndarray, current_events: List[Event]) -> np.ndarray:
         """
         Updates the internal history with current_events and overlays the pass network mini-map 

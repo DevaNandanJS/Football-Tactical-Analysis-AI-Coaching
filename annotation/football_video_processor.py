@@ -21,6 +21,7 @@ from utils import rgb_bgr_converter
 
 import cv2
 import numpy as np
+import os
 from typing import List, Dict, Optional, Tuple
 
 class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
@@ -495,6 +496,86 @@ class FootballVideoProcessor(AbstractAnnotator, AbstractVideoProcessor):
 
         return frame
     
+
+    def save_final_artifacts(self, output_dir: str) -> None:
+        """
+        Saves the final analysis artifacts (heatmaps, pass network, stats) to files.
+
+        Args:
+            output_dir (str): Directory where the files will be saved.
+        """
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        # 1. Save Heatmaps
+        heatmaps = self.heatmap_generator.get_final_heatmaps()
+        # heatmaps = [team1, team2, combined]
+        team1_name = self.club_assigner.club1.name
+        team2_name = self.club_assigner.club2.name
+        
+        cv2.imwrite(os.path.join(output_dir, f"heatmap_{team1_name}.png"), heatmaps[0])
+        cv2.imwrite(os.path.join(output_dir, f"heatmap_{team2_name}.png"), heatmaps[1])
+        cv2.imwrite(os.path.join(output_dir, "heatmap_combined.png"), heatmaps[2])
+        
+        # 2. Save Pass Network
+        pass_net_img = self.pass_annotator.get_final_network_image()
+        cv2.imwrite(os.path.join(output_dir, "pass_network.png"), pass_net_img)
+        
+        # 3. Save HTML Stats Report
+        stats1 = self.stats_manager.get_stats(1)
+        stats2 = self.stats_manager.get_stats(2)
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Match Analysis Report</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                table {{ border-collapse: collapse; width: 100%; max_width: 800px; }}
+                th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
+                th {{ background-color: #f2f2f2; }}
+                h1 {{ color: #333; }}
+                .team-header {{ font-weight: bold; font-size: 1.2em; }}
+            </style>
+        </head>
+        <body>
+            <h1>Match Analysis Report</h1>
+            <table>
+                <tr>
+                    <th>Statistic</th>
+                    <th>{team1_name}</th>
+                    <th>{team2_name}</th>
+                </tr>
+                <tr>
+                    <td>Total Passes</td>
+                    <td>{stats1.get('total_passes', 0)}</td>
+                    <td>{stats2.get('total_passes', 0)}</td>
+                </tr>
+                <tr>
+                    <td>Pass Completion Rate</td>
+                    <td>{stats1.get('pass_completion_rate', 0)}%</td>
+                    <td>{stats2.get('pass_completion_rate', 0)}%</td>
+                </tr>
+                <tr>
+                    <td>Possession</td>
+                    <td>{stats1.get('possession_percentage', 0)}%</td>
+                    <td>{stats2.get('possession_percentage', 0)}%</td>
+                </tr>
+                 <tr>
+                    <td>Total Distance Covered (px)</td>
+                    <td>{stats1.get('total_distance_pixels', 0)}</td>
+                    <td>{stats2.get('total_distance_pixels', 0)}</td>
+                </tr>
+            </table>
+        </body>
+        </html>
+        """
+        
+        with open(os.path.join(output_dir, "match_stats.html"), "w") as f:
+            f.write(html_content)
+
+        print(f"Artifacts saved to {output_dir}")
 
     def _display_possession_text(self, frame: np.ndarray, club1_width: int, club2_width: int,
                                   neutral_width: int, bar_x: int, bar_y: int, 

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Any
+from utils import point_distance
 
 @dataclass
 class Event:
@@ -13,15 +14,19 @@ class PassEventDetector:
     Tracks ball possession over time to identify passes and interceptions.
     """
 
-    def __init__(self, possession_threshold: int = 10):
+    def __init__(self, possession_threshold: int = 10, min_pass_distance: float = 30.0):
         """
         Initialize the PassEventDetector.
 
         Args:
             possession_threshold (int): A player must be the "closest" player for this 
                                         many consecutive frames to be considered the "owner".
+            min_pass_distance (float): Minimum distance (in pixels) for a possession change 
+                                       to be considered a valid pass. Helps filter ID switches/dribbling.
+                                       Set to 30.0 to handle ID switches while allowing short passes.
         """
         self.possession_threshold = possession_threshold
+        self.min_pass_distance = min_pass_distance
         
         # State variables
         self.current_owner_id: Optional[int] = None
@@ -76,29 +81,43 @@ class PassEventDetector:
             new_owner_id = self.potential_owner_id
             
             # If the confirmed owner is different from the current "official" owner
-            if self.current_owner_id is not None and new_owner_id != self.current_owner_id:
+            # We explicitly cast to int to ensure type safety when comparing IDs.
+            if self.current_owner_id is not None and int(new_owner_id) != int(self.current_owner_id):
                 
                 # Logic: We have a change in possession from A -> B
                 
                 # Determine event type
                 event_type = "PASS"
+                is_interception = False
+                
                 if self.current_owner_team_id != -1 and assigned_team_id != -1:
-                     if self.current_owner_team_id == assigned_team_id:
-                         event_type = "PASS"
-                     else:
+                     if self.current_owner_team_id != assigned_team_id:
                          event_type = "INTERCEPTION"
+                         is_interception = True
                 
                 # Create the event ONLY if we have valid coordinates for both start and end
                 if self.current_owner_location is not None and is_loc_valid:
-                    event = Event(
-                        start_xy=self.current_owner_location,
-                        end_xy=ball_location_2d,
-                        type=event_type,
-                        team_id=assigned_team_id
-                    )
                     
-                    new_events.append(event)
-                    self.pending_events.append(event)
+                    # Calculate distance
+                    dist = point_distance(self.current_owner_location, ball_location_2d)
+                    
+                    # VALIDATION: Check for short passes (Dribbles or ID Switches)
+                    # We assume any "Pass" (same team) shorter than min_pass_distance is likely 
+                    # a tracking glitch (ID switch) or a dribble, NOT a real pass.
+                    is_valid_pass = True
+                    if not is_interception and dist < self.min_pass_distance:
+                        is_valid_pass = False
+                    
+                    if is_valid_pass:
+                        event = Event(
+                            start_xy=self.current_owner_location,
+                            end_xy=ball_location_2d,
+                            type=event_type,
+                            team_id=assigned_team_id
+                        )
+                        
+                        new_events.append(event)
+                        self.pending_events.append(event)
 
             # Update current owner state
             # (Happens first time we confirm an owner, or after an event)
@@ -108,18 +127,15 @@ class PassEventDetector:
                 
                 # We assume the location at the moment of 'acquisition' (confirmation)
                 # is the start point for their possession.
-                # Only update if valid. If invalid, we wait for a frame where it IS valid.
                 if is_loc_valid:
                     self.current_owner_location = ball_location_2d
         
-        # Optional: If the current owner is still holding the ball, we *could* update 
-        # current_owner_location to the latest ball position. 
-        # BUT, the user wants the dots to be connected (Reception Point -> Next Pass).
-        # So we DISABLE this update. The 'start_xy' of the next pass will now match 
-        # the 'end_xy' of the previous pass exactly.
-        
-        # if self.current_owner_id == assigned_player_id and assigned_player_id != -1:
-        #      if is_loc_valid:
-        #          self.current_owner_location = ball_location_2d
+        # Update owner location while they hold the ball (Dribbling)
+        # This ensures that if they pass later, the pass starts from their CURRENT location,
+        # avoiding long "fake" pass lines that span the entire dribble.
+        # It also helps the distance check above filter out ID switches correctly.
+        if self.current_owner_id == assigned_player_id and assigned_player_id != -1:
+             if is_loc_valid:
+                 self.current_owner_location = ball_location_2d
 
         return new_events

@@ -5,6 +5,7 @@ from ball_to_player_assignment import BallToPlayerAssigner
 from annotation import FootballVideoProcessor
 
 import numpy as np
+import os
 
 def main():
     """
@@ -78,11 +79,16 @@ def main():
     # 7. Process the video
     # Specify the input video path and the output video path. 
     # The batch_size determines how many frames are processed in one go.
+    output_video_path = r'C:\Prototype-Football\football_analysis\output_videos\c3_out.mp4'
     process_video(processor,                                # Created FootballVideoProcessor object
-                  video_source= r'C:\Prototype-Football\football_analysis\input_videos\c2.mp4', # Video source (in this case video file path)
-                  output_video= r'C:\Prototype-Football\football_analysis\output_videos\c2_out.mp4',    # Output video path (Optional)
+                  video_source= r'C:\Prototype-Football\football_analysis\input_videos\c3.mp4', # Video source (in this case video file path)
+                  output_video= output_video_path,    # Output video path (Optional)
                   batch_size= 8                             # Number of frames to process at once
                   )
+    
+    # 8. Save Final Artifacts (Heatmaps, Pass Network, Stats)
+    output_dir = os.path.dirname(output_video_path)
+    processor.save_final_artifacts(output_dir)
 
 
 if __name__ == '__main__':

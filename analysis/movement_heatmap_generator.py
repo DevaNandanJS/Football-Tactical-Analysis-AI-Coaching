@@ -117,6 +117,20 @@ class MovementHeatmapGenerator:
                 self.map_team2[y1:y2, x1:x2] += kernel_slice
 
 
+    def get_final_heatmaps(self):
+        """
+        Returns the final accumulated heatmaps without any dynamic player dots.
+        Useful for saving the final analysis artifacts.
+        
+        Returns:
+            list: [heatmap_team1, heatmap_team2, heatmap_combined]
+        """
+        img_team1 = self._render_base_map(self.map_team1)
+        img_team2 = self._render_base_map(self.map_team2)
+        img_combined = self._render_base_map(self.map_combined)
+        
+        return [img_team1, img_team2, img_combined]
+
     def generate_heatmaps(self):
         """
         Generate the visualization images: Field + Heatmap + Player Dots.
