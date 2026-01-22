@@ -1,0 +1,4 @@
+as the AI lead engineer study and understand the project we are working on and fully understand its medthodology. you can go through
+all the nesessary scripts used in @football_analysis/main.py or go through @project_report.txt which contains the summary of theproject.
+regardless i want you to fully understand the working of this project so that we can build something in the next prompt
+

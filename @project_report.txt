@@ -1,0 +1,176 @@
+# Football Analysis AI: Definitive Technical Report
+
+**Version:** 2.0 (Deep Dive)
+**Date:** 12 January 2026
+**Architecture:** Asynchronous Producer-Consumer Pipeline
+**Core Frameworks:** OpenCV, Ultralytics YOLOv8, Scikit-Learn, SciPy
+
+---
+
+## 1. System Architecture & Data Flow
+
+The application is built on a highly optimized, multi-threaded pipeline designed to decouple the blocking nature of I/O (video reading/writing) from the CPU/GPU-intensive nature of AI inference.
+
+### 1.1 The Threaded Pipeline (`utils/video_utils.py`)
+The system uses `threading.Thread` to spawn three parallel execution contexts, communicating via `queue.Queue` (thread-safe FIFO buffers).
+
+*   **Thread 1: The Producer (Frame Capture)**
+    *   **Function:** `frame_capture_thread`
+    *   **Logic:**
+        *   Opens the video file via `cv2.VideoCapture`.
+        *   Immediately resizes every frame to **1920x1080** (standard analysis resolution).
+        *   Pushes a tuple `(frame_count, frame)` into the `frame_queue` (MaxSize=100).
+    *   **Why:** prevents the GPU from waiting on disk reads.
+
+*   **Thread 2: The Worker (AI Inference)**
+    *   **Function:** `frame_processing_thread`
+    *   **Logic:**
+        *   Pulls frames from `frame_queue`.
+        *   Aggregates them into batches (default **Batch Size: 30**).
+        *   Calls `FootballVideoProcessor.process(batch)`.
+        *   Pushes the fully annotated, processed frames into `processed_queue` (MaxSize=100).
+    *   **Why:** Batching is crucial for GPU throughput. Processing 30 frames at once is significantly faster than 30 separate calls.
+
+*   **Thread 3: The Consumer (Display & I/O)**
+    *   **Function:** `frame_display_thread`
+    *   **Logic:**
+        *   Pulls from `processed_queue`.
+        *   **Real-time Display:** Shows the frame in a window via `cv2.imshow` (allows for `cv2.waitKey` interactivity).
+        *   **Persistence:** Writes every frame as a `.jpg` to a `tempfile.TemporaryDirectory`.
+    *   **Why:** Writing a video stream (encoding) is slow. Writing individual JPEGs is faster and allows for robust failure recovery (if the app crashes, frames aren't corrupted).
+    *   **Finalization:** When processing ends, `_convert_frames_to_video` reads the sorted sequence of JPEGs and stitches them into an `.mp4` using `cv2.VideoWriter`.
+
+---
+
+## 2. The Core Engine: `FootballVideoProcessor`
+
+Located in `annotation/football_video_processor.py`, this class is the orchestrator. It holds instances of all sub-modules and dictates the sequential order of analysis operations.
+
+### 2.1 Initialization Phase
+*   **Inputs:** `video_path`, `club1_config`, `club2_config`.
+*   **Sub-Module Instantiation:**
+    1.  `ObjectTracker`: For Players/Ball/Refs.
+    2.  `KeypointsTracker`: For field landmarks.
+    3.  `ClubAssigner`: For team classification.
+    4.  `Homography`: For 3D-to-2D mapping.
+    5.  `BallToPlayerAssigner`: For possession logic.
+    6.  `PassEventDetector`: For game logic (passes/turnovers).
+    7.  `FormationDetector`: For tactical structure.
+    8.  `MovementHeatmapGenerator`: For spatial analysis.
+    9.  `TeamStatsManager`: For aggregate metrics.
+    10. `Annotators`: A suite of classes (Dashboard, PassNetwork, etc.) for visual rendering.
+
+### 2.2 The Processing Loop (`process()` method)
+For each batch of frames, the system executes:
+
+1.  **Detection:** `tracker.detect(batch)` -> Returns raw YOLO bounding boxes.
+2.  **Tracking:** `tracker.track(detections)` -> Assigns consistent IDs (BoTSORT).
+3.  **Field Mapping:** `keypoints_tracker.detect(batch)` -> Finds field markers. `homography.predict()` -> Updates transformation matrix.
+4.  **Team Assignment:** `club_assigner.assign_clubs()` -> Classification of every player.
+5.  **Possession:** `ball_assigner.assign()` -> Determines who has the ball.
+6.  **Game Logic:** `pass_detector.update()` -> Identifies passes/interceptions.
+7.  **Tactics:** `formation_detector.update()` -> Accumulates spatial data.
+8.  **Stats:** `stats_manager.update()` -> Updates distance/possession counters.
+9.  **Visualization:** Sequential calls to `annotator.annotate()` to draw layers on the frame.
+
+---
+
+## 3. Deep Dive: Computer Vision & Tracking
+
+### 3.1 Object Tracking (`tracking/object_tracker.py`)
+*   **Model:** YOLOv8 (Ultralytics).
+*   **Configuration:**
+    *   `conf=0.5` (General threshold).
+    *   `ball_conf=0.3` (Lower threshold for small objects like the ball).
+    *   **Tracker Config:** `tracker="botsort.yaml"`.
+*   **Pre-Processing:** Frames are resized to **1280x1280** before inference. This high resolution is critical for detecting the ball in wide-angle shots.
+*   **Post-Processing:**
+    *   Detections are mapped back to 1920x1080.
+    *   `sv.Detections` (Supervision library) is used to normalize the data structure.
+
+### 3.2 Field Registration (`position_mappers/homography.py`)
+*   **Goal:** Convert Perspective (Pixel x,y) -> Planar (Field Meter x,y).
+*   **Method:** Homography Transformation.
+*   **Keypoints:** The system detects specific field landmarks (Corner Flags, Penalty Spot, D-Arc intersections).
+*   **Reference Map:** A predefined set of coordinates representing a standard football pitch (105m x 68m).
+*   **Calculation:** `cv2.findHomography(source_points, dest_points, method=cv2.RANSAC)`.
+*   **Optimization:** The matrix is recalculated every frame to account for dynamic camera movement (Pan/Tilt/Zoom).
+
+---
+
+## 4. Deep Dive: Logic & Analytics
+
+### 4.1 Club Assignment (`club_assignment/club_assigner.py`)
+*   **Problem:** Determining which team a player belongs to.
+*   **Algorithm:**
+    1.  **Crop:** Extract the bounding box of the player.
+    2.  **ROI Selection:** Cut the bottom 50% of the crop (removing shorts/socks) to focus on the jersey.
+    3.  **Background Removal:** Apply a **Green Mask** (HSV Range: `[36, 25, 25]` to `[86, 255, 255]`) to subtract the grass.
+    4.  **Clustering:** Apply **K-Means (k=2)** on the remaining pixels.
+    5.  **Dominance:** Identify the cluster that is NOT the background.
+    6.  **Classification:** Calculate Euclidean distance between the cluster center and the pre-defined team colors. Assign to the closest match.
+
+### 4.2 Pass Event Detection (`analysis/pass_event_detector.py`)
+*   **State Machine:**
+    *   `current_owner_id`: The player currently holding the ball.
+    *   `consecutive_frames`: Counter to debounce noise.
+*   **Parameters:**
+    *   `possession_threshold = 10` frames: A player must hold the ball for ~0.3s to establish ownership.
+    *   `min_pass_distance = 30.0` pixels: A "pass" shorter than this is discarded (filters out ID switches and dribbling).
+*   **Event Logic:**
+    *   **Pass:** Ownership transfers from Player A (Team 1) -> Player B (Team 1).
+    *   **Interception:** Ownership transfers from Player A (Team 1) -> Player B (Team 2).
+*   **Data Structure:** `Event(start_xy, end_xy, type, team_id)`.
+
+### 4.3 Formation Detection (`analysis/formation_detector.py`)
+*   **Concept:** Inferring tactical shape from raw coordinates.
+*   **Buffer:** Maintains a sliding window of the last **600 frames** of player positions.
+*   **Exclusions:** Goalkeepers are excluded from the dataset.
+*   **Process:**
+    1.  **Clustering:** `KMeans(n_clusters=10)` reduces the thousands of points in the buffer to 10 representative centroids.
+    2.  **Normalization:** Centroids are min-max scaled to a `0-1` range.
+    3.  **Template Matching:** The system compares the centroids against a library of templates:
+        *   `4-4-2`, `4-3-3`, `4-2-3-1`, `3-5-2`, `3-4-3`, `5-3-2`.
+    4.  **Algorithm:** **Hungarian Algorithm (Linear Sum Assignment)** via `scipy.optimize`. This finds the optimal one-to-one mapping between the 10 detected centroids and the 10 template points.
+    5.  **Orientation:** The system tests both standard and 180-degree rotated versions of the templates (since teams attack in opposite directions) and selects the best fit.
+
+### 4.4 Movement Heatmaps (`analysis/movement_heatmap_generator.py`)
+*   **Grid:** The field is discretized into a 2D histogram.
+*   **Accumulation:** Every frame, the position of every player is incremented in the grid.
+*   **Smoothing:** A **Gaussian Blur** is applied to the raw grid to create organic "heat" blobs rather than pixelated noise.
+*   **Visualization:** The intensity map is normalized and color-mapped using `cv2.COLORMAP_JET` (Blue=Cold, Red=Hot).
+
+---
+
+## 5. Artifact Generation & Reporting
+
+Upon completion of the video processing, the system generates a "Tactical Package" in `output_videos/`.
+
+### 5.1 The HTML Report (`match_stats.html`)
+*   **Purpose:** A standalone, shareable document for coaches.
+*   **Content:**
+    *   **Stats Table:** Possession %, Total Passes, Completion Rate, Distance Covered.
+    *   **Distance Logic:** Pixels are converted to Meters (approx 100px = 1m in the projection) -> Kilometers.
+    *   **Visual Embeds:** The report explicitly references the generated PNGs for context.
+
+### 5.2 Pass Network Graph (`pass_network.png`)
+*   Generated by `PassNetworkAnnotator`.
+*   Visualizes the connections. Line thickness/opacity correlates to pass frequency.
+*   Nodes represent average reception positions.
+
+### 5.3 Heatmaps
+*   `heatmap_combined.png`: Total match intensity.
+*   `heatmap_{team1}.png`: Team specific spatial dominance.
+*   `heatmap_{team2}.png`: Team specific spatial dominance.
+
+---
+
+## 6. Library Dependencies & Versions
+
+*   **Python:** 3.10+
+*   **OpenCV (`opencv-python`):** 4.10.x (Image processing, drawing, video I/O).
+*   **Ultralytics:** 8.x (YOLOv8 implementation).
+*   **Supervision:** 0.x (Tracking utilities, bbox handling).
+*   **Scikit-Learn:** 1.5.x (K-Means Clustering).
+*   **SciPy:** 1.14.x (Linear Sum Assignment/Hungarian Algorithm).
+*   **NumPy:** 1.26.x (Matrix operations).
