@@ -9,14 +9,13 @@ import os
 
 def main():
     """
-    Main function to demonstrate how to use the football analysis project.
-    This script will walk you through loading models, assigning clubs, tracking objects and players, and processing the video.
+        Update your paths here before running as i have placed my own systems path here
     """
 
     # 1. Load the object detection model
     # Adjust the 'conf' value as per your requirements.
     obj_tracker = ObjectTracker(
-        model_path= r'C:\Prototype-Football\football_analysis\models\yolo-detect.pt',    # Object Detection Model Weights Path
+        model_path= r'C:\Prototype-Ultra\Prototype-Football\models\yolo-detect.pt',    # Object Detection Model Weights Path
         conf=.5,                                            # Object Detection confidence threshold
         ball_conf=.05                                        # Ball Detection confidence threshold
     )
@@ -24,7 +23,7 @@ def main():
     # 2. Load the keypoints detection model
     # Adjust the 'conf' and 'kp_conf' values as per your requirements.
     kp_tracker = KeypointsTracker(
-        model_path= r'C:\Prototype-Football\football_analysis\models\yolo-keypoints.pt', # Keypoints Model Weights Path
+        model_path= r'C:\Prototype-Ultra\Prototype-Football\models\yolo-keypoints.pt', # Keypoints Model Weights Path
         conf=.3,                                            # Field Detection confidence threshold
         kp_conf=.7,                                         # Keypoint confidence threshold
     )
@@ -70,8 +69,8 @@ def main():
                                        club_assigner,                                 # Created ClubAssigner object
                                        ball_player_assigner,                          # Created BallToPlayerAssigner object
                                        top_down_keypoints,                            # Created Top-Down keypoints numpy array
-                                       field_img_path= r'C:\Prototype-Football\football_analysis\input_videos\field_2d_v2.png', # Top-Down field image path
-                                       save_tracks_dir= r'C:\Prototype-Football\football_analysis\output_videos',               # Directory to save tracking information.
+                                       field_img_path= r'C:\Prototype-Ultra\Prototype-Football\input_videos\field_2d_v2.png', # Top-Down field image path
+                                       save_tracks_dir= r'C:\Prototype-Ultra\Prototype-Football\output_videos',               # Directory to save tracking information.
                                        draw_frame_num=True                            # Whether or not to draw current frame number on 
                                                                                       #the output video.
                                        )
@@ -79,9 +78,9 @@ def main():
     # 7. Process the video
     # Specify the input video path and the output video path. 
     # The batch_size determines how many frames are processed in one go.
-    output_video_path = r'C:\Prototype-Football\football_analysis\output_videos\c1_out.mp4'
+    output_video_path = r'C:\Prototype-Ultra\Prototype-Football\output_videos\c3_out.mp4'
     process_video(processor,                                # Created FootballVideoProcessor object
-                  video_source= r'C:\Prototype-Football\football_analysis\input_videos\c1.mp4', # Video source (in this case video file path)
+                  video_source= r'C:\Prototype-Ultra\Prototype-Football\input_videos\c3.mp4', # Video source (in this case video file path)
                   output_video= output_video_path,    # Output video path (Optional)
                   batch_size= 8                             # Number of frames to process at once
                   )
